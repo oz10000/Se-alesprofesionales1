@@ -1,0 +1,449 @@
+# .github/workflows/deploy.yml
+# Ruta: .github/workflows/deploy.yml
+# ============================================================
+# D.A.P.S Ω — GitHub Actions CI/CD
+# Verifica código, tests básicos y prepara deployment.
+# Compatible con Streamlit Cloud y deploy manual.
+# ============================================================
+
+name: D.A.P.S Ω CI/CD
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:  # Permite ejecución manual desde GitHub UI
+
+# ------------------------------------------------------------
+# PERMISOS
+# ------------------------------------------------------------
+permissions:
+  contents: read
+  pull-requests: write
+
+# ------------------------------------------------------------
+# VARIABLES GLOBALES
+# ------------------------------------------------------------
+env:
+  PYTHON_VERSION: "3.11"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  STREAMLIT_SERVER_HEADLESS: "true"
+  STREAMLIT_BROWSER_GATHER_USAGE_STATS: "false"
+
+# ------------------------------------------------------------
+# JOBS
+# ------------------------------------------------------------
+jobs:
+
+  # ==========================================================
+  # JOB 1: VALIDACIÓN DE SINTAXIS Y ESTRUCTURA
+  # ==========================================================
+  validate:
+    name: 🔍 Validar sintaxis y estructura
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: 📥 Checkout del repositorio
+        uses: actions/checkout@v4
+
+      - name: 🐍 Configurar Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+
+      - name: 📦 Instalar dependencias mínimas
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyyaml
+
+      - name: ✅ Verificar archivos requeridos
+        run: |
+          echo "Verificando archivos del proyecto..."
+          REQUIRED_FILES=(
+            "streamlit_app.py"
+            "config.py"
+            "config.yaml"
+            "data_engine.py"
+            "indicators.py"
+            "scoring.py"
+            "ranking.py"
+            "models.py"
+            "risk_manager.py"
+            "utils.py"
+            "requirements.txt"
+            "README.md"
+          )
+          MISSING=0
+          for f in "${REQUIRED_FILES[@]}"; do
+            if [ ! -f "$f" ]; then
+              echo "❌ FALTA: $f"
+              MISSING=1
+            else
+              echo "✅ OK: $f"
+            fi
+          done
+          if [ "$MISSING" -eq 1 ]; then
+            echo "❌ Faltan archivos requeridos"
+            exit 1
+          fi
+          echo "✅ Todos los archivos presentes"
+
+      - name: 🔍 Validar sintaxis Python
+        run: |
+          echo "Compilando archivos Python..."
+          python -m compileall -q \
+            streamlit_app.py \
+            config.py \
+            data_engine.py \
+            indicators.py \
+            scoring.py \
+            ranking.py \
+            models.py \
+            risk_manager.py \
+            utils.py
+          echo "✅ Sintaxis Python OK"
+
+      - name: 📋 Validar YAML de configuración
+        run: |
+          python -c "
+          import yaml
+          with open('config.yaml', 'r', encoding='utf-8') as f:
+              cfg = yaml.safe_load(f)
+          assert isinstance(cfg, dict), 'config.yaml debe ser dict'
+          assert 'project' in cfg, 'Falta project'
+          assert 'exchanges' in cfg, 'Falta exchanges'
+          assert 'symbols' in cfg, 'Falta symbols'
+          assert 'scoring' in cfg, 'Falta scoring'
+          assert 'risk' in cfg, 'Falta risk'
+          assert 'tiers' in cfg, 'Falta tiers'
+
+          # Validar suma de pesos
+          w = cfg['scoring']['weights']
+          total = sum(w.values())
+          assert abs(total - 1.0) < 1e-6, f'Pesos suman {total}, no 1.0'
+
+          # Validar sub-pesos de volumen
+          sw = cfg['scoring']['sub_weights']['volume']
+          total_sw = sum(sw.values())
+          assert abs(total_sw - 1.0) < 1e-6, f'Sub-pesos suman {total_sw}'
+
+          # Contar símbolos
+          total_syms = sum(len(v) for v in cfg['symbols'].values() if isinstance(v, list))
+          print(f'✅ config.yaml válido · {total_syms} símbolos')
+          "
+
+      - name: 📋 Validar YAML del workflow
+        run: |
+          python -c "
+          import yaml
+          with open('.github/workflows/deploy.yml', 'r', encoding='utf-8') as f:
+              wf = yaml.safe_load(f)
+          assert 'jobs' in wf, 'Falta jobs'
+          print(f'✅ Workflow válido · {len(wf[\"jobs\"])} jobs')
+          "
+
+  # ==========================================================
+  # JOB 2: TESTS UNITARIOS
+  # ==========================================================
+  test:
+    name: 🧪 Tests unitarios
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: validate
+
+    steps:
+      - name: 📥 Checkout del repositorio
+        uses: actions/checkout@v4
+
+      - name: 🐍 Configurar Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+
+      - name: 📦 Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-cov
+
+      - name: 🧪 Ejecutar tests (si existen)
+        run: |
+          if [ -d "tests" ] && [ "$(ls -A tests 2>/dev/null)" ]; then
+            pytest tests/ -v --cov=. --cov-report=xml --cov-report=term
+          else
+            echo "⚠️ No hay tests definidos. Ejecutando smoke tests..."
+            python -c "
+            import config
+            import indicators
+            import scoring
+            import ranking
+            import models
+            import risk_manager
+            import utils
+            print('✅ Imports OK')
+
+            # Test básico de indicadores
+            import pandas as pd
+            import numpy as np
+            n = 300
+            idx = pd.date_range('2026-01-01', periods=n, freq='15min', tz='UTC')
+            df = pd.DataFrame({
+                'open': np.random.randn(n).cumsum() + 100,
+                'high': np.random.randn(n).cumsum() + 101,
+                'low': np.random.randn(n).cumsum() + 99,
+                'close': np.random.randn(n).cumsum() + 100,
+                'volume': np.random.rand(n) * 1e6,
+            }, index=idx)
+            df['high'] = df[['open', 'high', 'close']].max(axis=1) + 0.5
+            df['low'] = df[['open', 'low', 'close']].min(axis=1) - 0.5
+
+            atr = indicators.compute_atr(df, 14)
+            assert len(atr) == n, 'ATR longitud incorrecta'
+
+            adx = indicators.compute_adx(df, 14)
+            assert len(adx) == n, 'ADX longitud incorrecta'
+
+            rsi = indicators.compute_rsi(df, 14)
+            assert len(rsi) == n, 'RSI longitud incorrecta'
+            assert rsi.min() >= 0 and rsi.max() <= 100, 'RSI fuera de rango'
+
+            print('✅ Indicadores OK')
+            "
+          fi
+
+      - name: 📤 Subir cobertura (si existe)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # ==========================================================
+  # JOB 3: SMOKE TEST COMPLETO DEL SCANNER
+  # ==========================================================
+  smoke-test:
+    name: 🚀 Smoke test del scanner
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: validate
+
+    steps:
+      - name: 📥 Checkout del repositorio
+        uses: actions/checkout@v4
+
+      - name: 🐍 Configurar Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+
+      - name: 📦 Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 🧪 Smoke test del flujo completo
+        run: |
+          python << 'EOF'
+          import pandas as pd
+          import numpy as np
+          from config import ScannerConfig
+          from scoring import CompositeScorer
+          from risk_manager import RiskManager
+          from ranking import rank_long, rank_short, rank_all, summary
+          from models import ScoreResult
+
+          # Config
+          config = ScannerConfig.from_yaml("config.yaml")
+          print(f"✅ Config cargada · {len(config.supported_exchanges)} exchanges")
+
+          # Data sintética realista
+          np.random.seed(42)
+          n = 300
+          idx = pd.date_range('2026-01-01', periods=n, freq='15min', tz='UTC')
+          base = 100 + np.cumsum(np.random.randn(n) * 0.5)
+          df = pd.DataFrame({
+              'open': base + np.random.randn(n) * 0.1,
+              'high': base + np.abs(np.random.randn(n)) * 0.5,
+              'low': base - np.abs(np.random.randn(n)) * 0.5,
+              'close': base,
+              'volume': np.random.rand(n) * 1e6 + 1e5,
+          }, index=idx)
+          df['high'] = df[['open', 'high', 'close']].max(axis=1) + 0.2
+          df['low'] = df[['open', 'low', 'close']].min(axis=1) - 0.2
+
+          data = {'entry': df, 'confirm': df, 'trend': df}
+
+          # Scorer
+          scorer = CompositeScorer(config)
+          risk = RiskManager(config)
+
+          res = scorer.compute('TEST/USDT', data)
+          assert isinstance(res, ScoreResult), "Resultado no es ScoreResult"
+          print(f"✅ Scoring OK · score={res.total_score:.1f} tier={res.tier} dir={res.direction}")
+
+          # Enriquecer con risk manager
+          res.entry_price = float(df['close'].iloc[-1])
+          res = risk.enrich(res)
+          assert res.sl_price > 0, "SL no calculado"
+          assert res.tp_price > 0, "TP no calculado"
+          assert res.entry_zone_low > 0, "Zona de entrada no calculada"
+          assert res.trailing_distance_pct >= 0, "Trailing no calculado"
+          assert res.expected_duration_min > 0, "Duración no calculada"
+          print(f"✅ Risk OK · SL={res.sl_pct:.2f}% TP={res.tp_pct:.2f}% R:R={res.rr_ratio:.2f}")
+
+          # Ranking
+          results = [res]
+          ranked = rank_all(results)
+          assert len(ranked) == 1
+          longs = rank_long(results)
+          shorts = rank_short(results)
+          print(f"✅ Ranking OK · longs={len(longs)} shorts={len(shorts)}")
+
+          # Summary
+          s = summary(results)
+          assert s['total'] == 1
+          print(f"✅ Summary OK · {s}")
+
+          print("\n🎉 SMOKE TEST COMPLETO — TODO OK")
+          EOF
+
+  # ==========================================================
+  # JOB 4: VERIFICACIÓN DE STREAMLIT
+  # ==========================================================
+  streamlit-check:
+    name: 🎨 Verificar Streamlit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: validate
+
+    steps:
+      - name: 📥 Checkout del repositorio
+        uses: actions/checkout@v4
+
+      - name: 🐍 Configurar Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+
+      - name: 📦 Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 🎨 Verificar que Streamlit puede importar la app
+        run: |
+          python -c "
+          import ast
+          with open('streamlit_app.py', 'r') as f:
+              src = f.read()
+          # Parsear AST para verificar sintaxis
+          tree = ast.parse(src)
+          # Verificar que importa módulos clave
+          imports = [n for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)]
+          modules_imported = [n.module for n in imports if n.module]
+          required = ['config', 'data_engine', 'scoring', 'risk_manager', 'ranking']
+          for req in required:
+              assert any(req in (m or '') for m in modules_imported), f'Falta import: {req}'
+          print('✅ Streamlit app importa todos los módulos requeridos')
+          "
+
+      - name: 🎨 Verificar que la app arranca
+        run: |
+          timeout 30 streamlit run streamlit_app.py --server.headless true --server.port 8501 &
+          STREAMLIT_PID=$!
+          sleep 20
+          if ps -p $STREAMLIT_PID > /dev/null; then
+            echo "✅ Streamlit arrancó correctamente"
+            kill $STREAMLIT_PID || true
+          else
+            echo "❌ Streamlit no arrancó"
+            exit 1
+          fi
+        continue-on-error: true
+
+  # ==========================================================
+  # JOB 5: BUILD DE ARTEFACTOS (solo en main)
+  # ==========================================================
+  build:
+    name: 📦 Build de artefactos
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [test, smoke-test]
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+
+    steps:
+      - name: 📥 Checkout del repositorio
+        uses: actions/checkout@v4
+
+      - name: 📦 Crear paquete de deployment
+        run: |
+          mkdir -p dist
+          # Copiar archivos requeridos
+          cp streamlit_app.py dist/
+          cp config.py dist/
+          cp config.yaml dist/
+          cp data_engine.py dist/
+          cp indicators.py dist/
+          cp scoring.py dist/
+          cp ranking.py dist/
+          cp models.py dist/
+          cp risk_manager.py dist/
+          cp utils.py dist/
+          cp requirements.txt dist/
+          cp README.md dist/
+          # Crear .streamlit para configuración
+          mkdir -p dist/.streamlit
+          cat > dist/.streamlit/config.toml << 'EOF'
+          [server]
+          headless = true
+          enableCORS = false
+          enableXsrfProtection = true
+          maxUploadSize = 10
+
+          [browser]
+          gatherUsageStats = false
+
+          [theme]
+          base = "light"
+          primaryColor = "#1f77b4"
+          backgroundColor = "#ffffff"
+          secondaryBackgroundColor = "#f0f2f6"
+          textColor = "#000000"
+          EOF
+          # Crear .gitignore
+          cat > dist/.gitignore << 'EOF'
+          __pycache__/
+          *.py[cod]
+          .cache/
+          cache/
+          logs/
+          *.parquet
+          .env
+          .DS_Store
+          EOF
+
+          # Crear README de deployment
+          cat > dist/DEPLOY.md << 'EOF'
+          # D.A.P.S Ω — Deployment
+
+          ## Streamlit Cloud
+
+          1. Subir a GitHub
+          2. Ir a share.streamlit.io
+          3. Conectar repositorio
+          4. Main module: `streamlit_app.py`
+          5. Deploy
+
+          ## Local
+
+          ```bash
+          pip install -r requirements.txt
+          streamlit run streamlit_app.py

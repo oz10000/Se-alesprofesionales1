@@ -1,0 +1,220 @@
+# config.yaml
+# Ruta: config.yaml
+# ============================================================
+# D.A.P.S Ω — Scanner Conservador
+# Configuración central
+# ============================================================
+
+project:
+  name: "D.A.P.S Ω — Scanner Conservador"
+  version: "1.0.0"
+  mode: "manual"
+  timezone: "UTC"
+  language: "es"
+
+# ------------------------------------------------------------
+# EXCHANGES SOPORTADOS
+# ------------------------------------------------------------
+exchanges:
+  supported:
+    - binance
+    - bybit
+  priority:
+    - binance
+    - bybit
+  rate_limit: true
+  timeout_ms: 30000
+  max_retries: 3
+
+# ------------------------------------------------------------
+# TIMEFRAMES SOPORTADOS
+# ------------------------------------------------------------
+timeframes:
+  supported:
+    - "5m"
+    - "15m"
+    - "1h"
+    - "4h"
+  default: "15m"
+  history_limit: 500
+  min_bars_required: 200
+
+# ------------------------------------------------------------
+# UNIVERSO DE ACTIVOS (Top 50 Binance + Bybit exclusivos)
+# ------------------------------------------------------------
+symbols:
+  binance:
+    - BTC/USDT
+    - ETH/USDT
+    - SOL/USDT
+    - BNB/USDT
+    - XRP/USDT
+    - DOGE/USDT
+    - ADA/USDT
+    - AVAX/USDT
+    - LINK/USDT
+    - DOT/USDT
+    - LTC/USDT
+    - BCH/USDT
+    - ETC/USDT
+    - XLM/USDT
+    - NEAR/USDT
+    - APT/USDT
+    - ARB/USDT
+    - OP/USDT
+    - INJ/USDT
+    - SUI/USDT
+    - UNI/USDT
+    - ATOM/USDT
+    - FIL/USDT
+    - VET/USDT
+    - ALGO/USDT
+    - ICP/USDT
+    - AAVE/USDT
+    - MKR/USDT
+    - CRV/USDT
+    - LDO/USDT
+    - SAND/USDT
+    - MANA/USDT
+    - GALA/USDT
+    - AXS/USDT
+    - PEPE/USDT
+    - WIF/USDT
+    - BONK/USDT
+    - FLOKI/USDT
+    - SEI/USDT
+    - TIA/USDT
+    - PYTH/USDT
+    - JUP/USDT
+    - RENDER/USDT
+    - FET/USDT
+    - AR/USDT
+    - STX/USDT
+    - KAS/USDT
+    - DASH/USDT
+    - ZEC/USDT
+    - XMR/USDT
+  bybit:
+    - HYPE/USDT
+    - EIGEN/USDT
+    - CATI/USDT
+    - HMSTR/USDT
+    - BIO/USDT
+    - XPL/USDT
+    - FARTCOIN/USDT
+    - TRUMP/USDT
+    - COW/USDT
+    - WLD/USDT
+    - VELVET/USDT
+    - APR/USDT
+
+# ------------------------------------------------------------
+# SCORING — PESOS NORMALIZADOS (suman 1.0)
+# ------------------------------------------------------------
+scoring:
+  weights:
+    trend: 0.17
+    momentum: 0.15
+    volume_intelligence: 0.40
+    volatility: 0.11
+    liquidity: 0.10
+    regime: 0.07
+
+  sub_weights:
+    volume:
+      tfi: 0.35
+      ofi: 0.25
+      rvol: 0.25
+      cvd: 0.15
+
+# ------------------------------------------------------------
+# UMBRALES DINÁMICOS POR RÉGIMEN
+# ------------------------------------------------------------
+thresholds:
+  regime_thresholds:
+    Expansion:    {min_score: 75, min_adx: 20, min_rvol: 1.5}
+    Trend_Strong: {min_score: 75, min_adx: 25, min_rvol: 1.5}
+    Trend_Weak:   {min_score: 70, min_adx: 20, min_rvol: 1.8}
+    Chop:         {min_score: 65, min_adx: 15, min_rvol: 2.0}
+  min_prob_directional: 0.60
+  min_expected_move_pct: 0.0032
+
+# ------------------------------------------------------------
+# TIERS (mejor → peor): Ω > A > B > S
+# ------------------------------------------------------------
+tiers:
+  OMEGA: 90.0
+  A: 80.0
+  B: 70.0
+  S: 60.0
+  NO_TRADE: 0.0
+
+# ------------------------------------------------------------
+# GESTIÓN DE RIESGO
+# ------------------------------------------------------------
+risk:
+  initial_capital: 10000.0
+  risk_per_trade: 0.01
+  max_leverage_recommended: 5
+
+  stop_loss:
+    atr_mult_default: 1.8
+    atr_mult_by_symbol:
+      BTC/USDT: 1.8
+      ETH/USDT: 1.8
+      SOL/USDT: 2.0
+      XRP/USDT: 1.5
+      BNB/USDT: 1.8
+      DOGE/USDT: 2.5
+      PEPE/USDT: 3.0
+      WIF/USDT: 3.0
+      BONK/USDT: 3.0
+      FLOKI/USDT: 3.0
+      default: 2.0
+    min_pct: 0.0015
+    max_pct: 0.0200
+
+  take_profit:
+    atr_mult_default: 2.5
+    min_pct: 0.0030
+
+  trailing:
+    atr_mult_default: 2.0
+    floor: 0.03
+    cap: 0.08
+    activation_atr: 0.50
+    breakeven_trigger_atr: 0.25
+
+  entry:
+    zone_atr_mult: 0.30
+    max_chase_pct: 0.005
+
+# ------------------------------------------------------------
+# COSTOS ESTIMADOS
+# ------------------------------------------------------------
+costs:
+  fee_per_side: 0.0005
+  slippage: 0.0003
+  spread: 0.0002
+
+# ------------------------------------------------------------
+# VERIFICACIÓN FUNCIONAL
+# ------------------------------------------------------------
+verification:
+  enabled: true
+  iterations: 300
+  min_success_rate: 0.95
+
+# ------------------------------------------------------------
+# DIRECTORIOS
+# ------------------------------------------------------------
+directories:
+  cache: "./cache"
+  logs: "./logs"
+
+# ------------------------------------------------------------
+# LOGGING
+# ------------------------------------------------------------
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
