@@ -4,13 +4,13 @@
 # D.A.P.S Ω — Scanner Conservador Multi-Exchange
 #
 # Características:
-#   - Selección de exchange (Binance / Bybit)
-#   - Selección de timeframe (5m / 15m / 1h / 4h)
-#   - Análisis multi-timeframe completo (los 4 TF)
-#   - Ranking LONG y SHORT independientes
-#   - Predicción operativa (entrada, SL, TP, trailing, duración)
+#   - Detección automática de exchanges bloqueados
+#   - Solo muestra exchanges operativos (OKX/Kraken/MEXC/Bitget en cloud)
+#   - Filtrado de stablecoins y tokens sintéticos
+#   - Análisis multi-timeframe (5m / 15m / 1h / 4h)
+#   - Rankings LONG y SHORT independientes
+#   - Predicción operativa completa
 #   - Temporizador hasta próximo trade aprobado
-#   - Sin backtesting ni optimización
 # ============================================================
 
 import logging
@@ -122,13 +122,30 @@ except Exception as e:
 
 
 # ------------------------------------------------------------
+# VERIFICAR EXCHANGES DISPONIBLES
+# ------------------------------------------------------------
+available_exchanges = engine.get_available_exchanges()
+blocked_exchanges = engine.get_blocked_exchanges()
+
+if not available_exchanges:
+    st.error(
+        "❌ **Ningún exchange disponible.** "
+        "Todos están bloqueados desde esta IP.\n\n"
+        "**Solución:** Ejecutar el proyecto localmente con `streamlit run streamlit_app.py`."
+    )
+    if blocked_exchanges:
+        st.warning(f"Exchanges bloqueados: {', '.join(blocked_exchanges)}")
+    st.stop()
+
+
+# ------------------------------------------------------------
 # ESTADO DE SESIÓN
 # ------------------------------------------------------------
 _defaults = {
     "scan_results": [],
     "last_scan": None,
     "next_scan": None,
-    "current_exchange": None,
+    "current_exchange": available_exchanges[0],
     "current_timeframe": config.default_timeframe,
     "next_trade_eta": None,
     "next_trade_symbol": None,
@@ -143,43 +160,43 @@ for k, v in _defaults.items():
 
 
 # ------------------------------------------------------------
-# EXCHANGES DISPONIBLES
-# ------------------------------------------------------------
-available_exchanges = engine.get_available_exchanges()
-main_exchanges = [e for e in engine.MAIN_EXCHANGES if e in available_exchanges]
-
-if not main_exchanges:
-    main_exchanges = available_exchanges
-
-if not main_exchanges:
-    st.error("❌ No hay exchanges disponibles. Revisá tu conexión.")
-    st.stop()
-
-
-# ------------------------------------------------------------
 # HEADER
 # ------------------------------------------------------------
 st.title("Ω D.A.P.S — Scanner Conservador")
 st.caption(
     f"Versión {config.project.get('version', '1.1.0')} · "
-    f"Binance / Bybit · Multi-Timeframe (5m / 15m / 1h / 4h)"
+    f"{len(available_exchanges)} exchanges activos · "
+    f"Multi-Timeframe (5m / 15m / 1h / 4h)"
 )
+
+if blocked_exchanges:
+    st.info(
+        f"ℹ️ **{len(blocked_exchanges)} exchanges bloqueados** desde esta IP: "
+        f"{', '.join(blocked_exchanges)}. "
+        f"El sistema usa automáticamente los exchanges operativos."
+    )
 
 
 # ------------------------------------------------------------
-# SIDEBAR — CONTROLES
+# SIDEBAR
 # ------------------------------------------------------------
 with st.sidebar:
     st.header("⚙️ Configuración")
 
-    # ---- Exchange ----
+    # ---- Exchange (solo disponibles) ----
     exchange = st.selectbox(
         "Exchange",
-        options=main_exchanges,
+        options=available_exchanges,
         index=0,
-        help="Binance y Bybit son los principales. Fallback automático a MEXC/Bitget/OKX/Kraken.",
+        help="Solo se muestran exchanges accesibles desde esta IP.",
     )
     st.session_state.current_exchange = exchange
+
+    # ---- Info de exchanges bloqueados ----
+    if blocked_exchanges:
+        with st.expander(f"⚠️ {len(blocked_exchanges)} bloqueados"):
+            for ex_id in blocked_exchanges:
+                st.caption(f"🚫 {ex_id} (no accesible)")
 
     # ---- Timeframe ----
     timeframe = st.selectbox(
@@ -190,7 +207,7 @@ with st.sidebar:
             if config.default_timeframe in config.supported_timeframes
             else 0
         ),
-        help="El timeframe seleccionado se usa como entrada. Los otros 3 se usan para confirmación.",
+        help="El TF seleccionado se usa como entrada. Los otros 3 confirman.",
     )
     st.session_state.current_timeframe = timeframe
 
@@ -213,10 +230,10 @@ with st.sidebar:
     except Exception:
         n_symbols = 0
 
-    st.caption(f"Exchange activo: **{exchange}**")
-    st.caption(f"Timeframe entrada: **{timeframe}**")
-    st.caption(f"Activos: **{n_symbols}**")
-    st.caption(f"Exchanges conectados: **{len(available_exchanges)}**")
+    st.caption(f"Exchange: **{exchange}**")
+    st.caption(f"Timeframe: **{timeframe}**")
+    st.caption(f"Activos disponibles: **{n_symbols}**")
+    st.caption(f"Exchanges OK: **{len(available_exchanges)}**")
 
     if st.session_state.last_scan:
         st.caption(
@@ -227,9 +244,8 @@ with st.sidebar:
         st.caption("Último escaneo: **nunca**")
 
     if st.session_state.scan_duration > 0:
-        st.caption(f"Duración último escaneo: **{st.session_state.scan_duration:.1f}s**")
+        st.caption(f"Duración: **{st.session_state.scan_duration:.1f}s**")
 
-    # ---- Próximo escaneo ----
     if st.session_state.next_scan:
         remaining = (st.session_state.next_scan - now_utc()).total_seconds()
         if remaining > 0:
@@ -238,7 +254,6 @@ with st.sidebar:
         else:
             st.caption("Próximo escaneo: **disponible**")
 
-    # ---- Estado del engine ----
     st.markdown("---")
     with st.expander("🌐 Exchanges conectados"):
         for ex_id in available_exchanges:
@@ -286,7 +301,7 @@ def do_scan(exchange_id: str, entry_tf: str) -> tuple:
                 progress.progress((i + 1) / total)
                 continue
 
-            # ---- Scoring con data completa ----
+            # ---- Scoring ----
             res = scorer.compute(sym, data)
 
             # ---- Precio actual ----
@@ -343,13 +358,15 @@ if scan_btn:
             valid = [r for r in results if r.is_valid]
             if valid:
                 best = max(valid, key=lambda x: x.total_score)
-                eta = best.next_entry_eta_min
-                st.session_state.next_trade_eta = eta
+                st.session_state.next_trade_eta = best.next_entry_eta_min
                 st.session_state.next_trade_symbol = best.symbol
                 st.session_state.next_trade_confidence = best.confidence
             else:
-                # Estimar ETA a la próxima señal
-                all_etas = [r.next_entry_eta_min for r in results if r.next_entry_eta_min > 0]
+                all_etas = [
+                    r.next_entry_eta_min
+                    for r in results
+                    if r.next_entry_eta_min > 0
+                ]
                 st.session_state.next_trade_eta = min(all_etas) if all_etas else None
                 st.session_state.next_trade_symbol = None
                 st.session_state.next_trade_confidence = 0.0
@@ -375,7 +392,7 @@ tab_dashboard, tab_long, tab_short, tab_all = st.tabs(
 
 
 # ------------------------------------------------------------
-# TABLA HELPERS
+# HELPERS DE TABLAS
 # ------------------------------------------------------------
 def _ranking_rows(rlist):
     rows = []
@@ -425,13 +442,10 @@ def _operativo_rows(rlist):
             "Tipo": r.entry_type,
             "SL $": fmt_price(r.sl_price),
             "SL %": f"{r.sl_pct:.2f}%",
-            "SL método": r.sl_method,
             "TP $": fmt_price(r.tp_price),
             "TP %": f"{r.tp_pct:.2f}%",
-            "TP método": r.tp_method,
             "R:R": f"{r.rr_ratio:.2f}",
             "Trailing %": f"{r.trailing_distance_pct:.2f}%",
-            "Activación %": f"{r.trailing_activation_pct:.2f}%",
             "BE %": f"{r.breakeven_trigger_pct:.2f}%",
             "Dur. (min)": round(r.expected_duration_min, 1),
             "T a TP (min)": round(r.time_to_tp_min, 1),
@@ -464,14 +478,11 @@ with tab_dashboard:
         c5.metric("Score promedio", f"{s['avg_score']:.1f}")
         c6.metric("Score máximo", f"{s['max_score']:.1f}")
         c7.metric("Neutrales", s["neutral"])
-        c8.metric(
-            "Exchange",
-            st.session_state.current_exchange or "N/A",
-        )
+        c8.metric("Exchange", st.session_state.current_exchange or "N/A")
 
         st.markdown("---")
 
-        # ---- Temporizador hasta próximo trade ----
+        # ---- Temporizador ----
         eta = st.session_state.next_trade_eta
         symbol_eta = st.session_state.next_trade_symbol
         conf_eta = st.session_state.next_trade_confidence
@@ -484,7 +495,10 @@ with tab_dashboard:
                 f"Confianza: {conf_eta:.0f}%"
             )
         else:
-            st.warning("⏳ Sin señales aprobadas en este momento. Esperá el próximo escaneo.")
+            st.warning(
+                "⏳ **Sin señales aprobadas en este momento.** "
+                "Esperá el próximo escaneo o cambiá de exchange/timeframe."
+            )
 
         st.markdown("---")
 
@@ -749,7 +763,7 @@ with tab_all:
 
         st.markdown("#### 📋 Tabla completa")
         df = pd.DataFrame(_ranking_rows(all_ranked))
-        st.dataframe(df, use_container_width=True, height=700)
+        st.dataframe(df, use_container_width=True, height=600)
 
         # ---- Descarga CSV ----
         csv = df.to_csv(index=False).encode("utf-8")
