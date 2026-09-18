@@ -1,22 +1,20 @@
 # data_engine.py
 # Ruta: data_engine.py
 # ============================================================
-# D.A.P.S Ω — Motor de datos multi-exchange con fallbacks
+# D.A.P.S Ω — Motor de datos multi-exchange con detección de bloqueo
 #
 # Características:
-#   - Binance y Bybit como exchanges principales
-#   - MEXC, Bitget, OKX, Kraken como fallback
-#   - Top 40 activos por volumen en cada exchange principal
+#   - Detecta exchanges bloqueados en cloud automáticamente
+#   - Prioriza exchanges funcionales (OKX, Kraken, MEXC, Bitget)
+#   - Filtra stablecoins y tokens sintéticos
+#   - Top 40 activos reales por volumen
 #   - Multi-timeframe: 5m, 15m, 1h, 4h
-#   - Caché Parquet con TTL
-#   - Validación de continuidad de velas
-#   - Manejo de rate limits según documentación CCXT
 # ============================================================
 
 import os
 import time
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -27,12 +25,47 @@ logger = logging.getLogger(__name__)
 # ------------------------------------------------------------
 # CONSTANTES
 # ------------------------------------------------------------
-CACHE_TTL_SECONDS = 3600          # 1 hora
-MAX_RETRIES = 3
-RETRY_DELAY_SECONDS = 1.5
-TOP_N_ASSETS = 40                 # Top 40 por volumen
+CACHE_TTL_SECONDS = 3600
+MAX_RETRIES = 2
+RETRY_DELAY_SECONDS = 1.0
+TOP_N_ASSETS = 40
 SUPPORTED_TIMEFRAMES = ["5m", "15m", "1h", "4h"]
-OHLCV_LIMIT = 500                 # Velas por timeframe
+OHLCV_LIMIT = 500
+
+# ------------------------------------------------------------
+# BLACKLIST — Excluir stablecoins y tokens sintéticos
+# ------------------------------------------------------------
+STABLECOINS = {
+    "USDC", "USDT", "BUSD", "DAI", "TUSD", "USDD", "FRAX",
+    "USDP", "UST", "USTC", "GUSD", "USDE", "PYUSD", "FDUSD",
+    "USDG", "USDE", "SUSD", "MIM", "LUSD", "ALUSD",
+}
+
+SYNTHETICS = {
+    "XAUT", "PAXG",   # tokenized gold
+    "WBTC", "WETH", "WSTETH", "STETH", "CBETH", "RETH",  # wrapped
+}
+
+# Tokens sintéticos tipo Binance X-stocks (X-prefix + mayúsculas)
+# XAUT, XSOXL, XSNDK, XMSTR, XCRCL, etc.
+def _is_synthetic_prefix(base: str) -> bool:
+    if len(base) < 3:
+        return False
+    # X seguido de 2+ letras mayúsculas = token sintético
+    return base.startswith("X") and base[1:].isalpha() and base[1:].isupper()
+
+
+def _is_valid_base(base: str) -> bool:
+    """Determina si una base es un activo cripto real."""
+    if not base or not base.isalpha():
+        return False
+    if base in STABLECOINS:
+        return False
+    if base in SYNTHETICS:
+        return False
+    if _is_synthetic_prefix(base):
+        return False
+    return True
 
 
 # ============================================================
@@ -41,21 +74,16 @@ OHLCV_LIMIT = 500                 # Velas por timeframe
 
 class DataEngine:
     """
-    Motor de datos multi-exchange con fallbacks en cascada.
+    Motor de datos multi-exchange con detección de bloqueo.
 
-    Principales:
-        - binance
-        - bybit
-
-    Fallback:
-        - mexc
-        - bitget
-        - okx
-        - kraken
+    - Prueba cada exchange al conectar
+    - Marca como "blocked" los que fallan
+    - Reordena prioridad: exchanges funcionales primero
+    - Filtra stablecoins y sintéticos
     """
 
     MAIN_EXCHANGES = ["binance", "bybit"]
-    FALLBACK_EXCHANGES = ["mexc", "bitget", "okx", "kraken"]
+    FALLBACK_EXCHANGES = ["okx", "kraken", "mexc", "bitget"]
     ALL_EXCHANGES = MAIN_EXCHANGES + FALLBACK_EXCHANGES
 
     # --------------------------------------------------------
@@ -68,139 +96,148 @@ class DataEngine:
         os.makedirs(self.cache_dir, exist_ok=True)
 
         self.exchanges: Dict[str, ccxt.Exchange] = {}
-        self.available: List[str] = []
+        self.available: List[str] = []         # Conectados OK
+        self.blocked: List[str] = []           # Bloqueados/failed
         self.symbols_cache: Dict[str, List[str]] = {}
 
         self._connect_all()
 
     # --------------------------------------------------------
-    # CONEXIÓN A EXCHANGES
+    # CONEXIÓN + TEST
     # --------------------------------------------------------
 
     def _connect_all(self) -> None:
-        """Conecta a todos los exchanges disponibles."""
+        """Conecta y prueba cada exchange."""
         for ex_id in self.ALL_EXCHANGES:
             try:
                 ex_class = getattr(ccxt, ex_id, None)
                 if ex_class is None:
-                    logger.warning(f"⚠️ {ex_id}: no existe en CCXT")
+                    self.blocked.append(ex_id)
                     continue
 
                 ex = ex_class({
                     "enableRateLimit": True,
-                    "timeout": 30000,
+                    "timeout": 15000,
                     "options": {"defaultType": "spot"},
                 })
                 ex.load_markets()
-                self.exchanges[ex_id] = ex
-                self.available.append(ex_id)
-                n_symbols = len(ex.symbols) if hasattr(ex, "symbols") else 0
-                logger.info(f"✅ {ex_id}: {n_symbols} símbolos cargados")
+
+                # Test funcional: fetch de 2 velas de BTC
+                if self._test_exchange(ex):
+                    self.exchanges[ex_id] = ex
+                    self.available.append(ex_id)
+                    n_sym = len(ex.symbols) if hasattr(ex, "symbols") else 0
+                    logger.info(f"✅ {ex_id}: OK · {n_sym} símbolos")
+                else:
+                    self.blocked.append(ex_id)
+                    logger.warning(f"🚫 {ex_id}: bloqueado o inaccesible desde esta IP")
 
             except Exception as e:
-                logger.warning(f"⚠️ {ex_id}: {e}")
+                self.blocked.append(ex_id)
+                logger.warning(f"🚫 {ex_id}: {str(e)[:80]}")
 
         if not self.available:
-            logger.error("❌ Ningún exchange disponible")
+            logger.error("❌ CRÍTICO: Ningún exchange disponible")
+        else:
+            logger.info(
+                f"✅ {len(self.available)} exchanges operativos · "
+                f"{len(self.blocked)} bloqueados"
+            )
+
+    def _test_exchange(self, ex: ccxt.Exchange) -> bool:
+        """Prueba si el exchange responde desde esta IP."""
+        try:
+            ohlcv = ex.fetch_ohlcv("BTC/USDT", "1h", limit=2)
+            return bool(ohlcv) and len(ohlcv) >= 1
+        except ccxt.ExchangeError as e:
+            err = str(e).lower()
+            # Detectar bloqueos típicos (451, geo-restricted, etc.)
+            if any(k in err for k in ["451", "403", "restricted", "blocked", "forbidden"]):
+                return False
+            return False
+        except Exception:
+            return False
 
     # --------------------------------------------------------
-    # TOP 40 ACTIVOS POR VOLUMEN
+    # TOP 40 SÍMBOLOS POR VOLUMEN (FILTRADOS)
     # --------------------------------------------------------
 
     def fetch_top_symbols(self, exchange_id: str, top_n: int = TOP_N_ASSETS) -> List[str]:
-        """
-        Obtiene los top N símbolos por volumen (quoteVolume) en un exchange.
-
-        Usa fetch_tickers si está disponible; si no, usa load_markets
-        ordenado por volumen base.
-
-        Args:
-            exchange_id: ID del exchange (ej: 'binance').
-            top_n: Número de activos a retornar.
-
-        Returns:
-            Lista de símbolos unificados (ej: ['BTC/USDT', ...]).
-        """
+        """Obtiene top N símbolos reales por volumen."""
         cache_key = f"{exchange_id}_top{top_n}"
         if cache_key in self.symbols_cache:
             return self.symbols_cache[cache_key]
 
         ex = self.exchanges.get(exchange_id)
         if ex is None:
-            logger.warning(f"⚠️ {exchange_id} no disponible para top symbols")
+            logger.warning(f"⚠️ {exchange_id} no disponible")
             return []
 
-        symbols: List[str] = []
+        candidates: List[str] = []
 
-        # ---- Intento 1: fetch_tickers ordenado por quoteVolume ----
+        # ---- Intento 1: fetch_tickers por quoteVolume ----
         try:
             if ex.has.get("fetchTickers", False):
                 tickers = ex.fetch_tickers()
-                if tickers:
-                    # Filtrar solo pares /USDT spot
-                    filtered = {
-                        k: v for k, v in tickers.items()
-                        if k.endswith("/USDT")
-                        and v.get("quoteVolume") is not None
-                        and v.get("quoteVolume") > 0
-                    }
-                    # Ordenar por quoteVolume descendente
-                    sorted_tickers = sorted(
-                        filtered.items(),
-                        key=lambda kv: float(kv[1].get("quoteVolume", 0)),
-                        reverse=True,
-                    )
-                    symbols = [k for k, _ in sorted_tickers[:top_n]]
-                    logger.info(
-                        f"✅ {exchange_id}: {len(symbols)} top symbols por quoteVolume"
-                    )
-        except Exception as e:
-            logger.warning(f"⚠️ {exchange_id} fetch_tickers falló: {e}")
+                filtered = {}
+                for sym, t in tickers.items():
+                    if not sym.endswith("/USDT"):
+                        continue
+                    base = sym.split("/")[0]
+                    if not _is_valid_base(base):
+                        continue
+                    qv = t.get("quoteVolume")
+                    if qv is None or qv <= 0:
+                        continue
+                    filtered[sym] = float(qv)
 
-        # ---- Intento 2: load_markets ordenado por volumen base ----
-        if not symbols:
+                candidates = sorted(filtered, key=filtered.get, reverse=True)[:top_n]
+                logger.info(f"✅ {exchange_id}: {len(candidates)} símbolos filtrados por volumen")
+        except Exception as e:
+            logger.warning(f"⚠️ {exchange_id} fetch_tickers: {e}")
+
+        # ---- Intento 2: markets ordenados ----
+        if not candidates:
             try:
                 markets = ex.markets
-                usdt_markets = {
-                    k: v for k, v in markets.items()
-                    if k.endswith("/USDT")
-                    and v.get("active", True)
-                    and v.get("spot", True)
-                }
-                # Ordenar por volumen base si está disponible
-                sorted_markets = sorted(
-                    usdt_markets.items(),
-                    key=lambda kv: float(kv[1].get("baseVolume", 0) or 0),
-                    reverse=True,
-                )
-                symbols = [k for k, _ in sorted_markets[:top_n]]
-                logger.info(
-                    f"✅ {exchange_id}: {len(symbols)} top symbols por baseVolume"
-                )
+                filtered = []
+                for sym, m in markets.items():
+                    if not sym.endswith("/USDT"):
+                        continue
+                    base = sym.split("/")[0]
+                    if not _is_valid_base(base):
+                        continue
+                    if not m.get("active", True):
+                        continue
+                    filtered.append(sym)
+                candidates = filtered[:top_n]
+                logger.info(f"✅ {exchange_id}: {len(candidates)} símbolos filtrados (fallback)")
             except Exception as e:
-                logger.warning(f"⚠️ {exchange_id} load_markets falló: {e}")
+                logger.error(f"❌ {exchange_id}: {e}")
 
-        # ---- Fallback: primeros N símbolos /USDT ----
-        if not symbols:
+        # ---- Último fallback: lista estática filtrada ----
+        if not candidates:
             try:
-                symbols = [
-                    s for s in ex.symbols
-                    if s.endswith("/USDT")
-                ][:top_n]
-                logger.info(
-                    f"✅ {exchange_id}: {len(symbols)} top symbols por orden alfabético"
-                )
-            except Exception as e:
-                logger.error(f"❌ {exchange_id} no se pudieron obtener símbolos: {e}")
+                for sym in ex.symbols:
+                    if not sym.endswith("/USDT"):
+                        continue
+                    base = sym.split("/")[0]
+                    if _is_valid_base(base):
+                        candidates.append(sym)
+                        if len(candidates) >= top_n:
+                            break
+                logger.info(f"✅ {exchange_id}: {len(candidates)} símbolos (orden alfabético)")
+            except Exception:
+                pass
 
-        self.symbols_cache[cache_key] = symbols
-        return symbols
+        self.symbols_cache[cache_key] = candidates
+        return candidates
 
     # --------------------------------------------------------
-    # FETCH OHLCV CON FALLBACK
+    # FETCH OHLCV CON FALLBACK INTELIGENTE
     # --------------------------------------------------------
 
-    def fetch_ohlcv(
+    def fetch(
         self,
         symbol: str,
         exchange_id: str,
@@ -208,30 +245,15 @@ class DataEngine:
         limit: int = OHLCV_LIMIT,
         use_cache: bool = True,
     ) -> Optional[pd.DataFrame]:
-        """
-        Obtiene velas OHLCV con fallback entre exchanges.
-
-        Args:
-            symbol: Símbolo unificado (ej: 'BTC/USDT').
-            exchange_id: Exchange preferido.
-            timeframe: Temporalidad ('5m', '15m', '1h', '4h').
-            limit: Número de velas a obtener.
-            use_cache: Usar caché si está disponible.
-
-        Returns:
-            DataFrame con columnas OHLCV, o None si falla.
-        """
-        # Validar timeframe
+        """Obtiene OHLCV con fallback entre exchanges operativos."""
         if timeframe not in SUPPORTED_TIMEFRAMES:
-            logger.warning(f"⚠️ Timeframe {timeframe} no soportado")
             return None
 
-        # ---- Caché ----
+        # ---- Caché fresca ----
         cache_file = os.path.join(
             self.cache_dir,
             f"{exchange_id}_{symbol.replace('/', '_')}_{timeframe}_{limit}.parquet",
         )
-
         if use_cache and os.path.exists(cache_file):
             try:
                 df = pd.read_parquet(cache_file)
@@ -240,93 +262,54 @@ class DataEngine:
             except Exception:
                 pass
 
-        # ---- Intentar exchange preferido ----
-        df = self._try_fetch_ohlcv(exchange_id, symbol, timeframe, limit)
+        # ---- Orden de intentos: preferido primero, luego el resto ----
+        try_order = [exchange_id] + [e for e in self.available if e != exchange_id]
 
-        # ---- Fallback a otros exchanges ----
-        if df is None:
-            for fallback_id in self.available:
-                if fallback_id == exchange_id:
-                    continue
-                df = self._try_fetch_ohlcv(fallback_id, symbol, timeframe, limit)
-                if df is not None:
-                    logger.info(
-                        f"✅ {symbol} {timeframe} obtenido de {fallback_id} "
-                        f"(fallback desde {exchange_id})"
-                    )
-                    break
+        for ex_id in try_order:
+            ex = self.exchanges.get(ex_id)
+            if ex is None:
+                continue
 
-        # ---- Guardar en caché ----
-        if df is not None and use_cache:
-            try:
-                df.to_parquet(cache_file)
-            except Exception as e:
-                logger.debug(f"No se pudo guardar caché: {e}")
+            df = self._try_fetch_ohlcv(ex, ex_id, symbol, timeframe, limit)
+            if df is not None:
+                if use_cache:
+                    try:
+                        df.to_parquet(cache_file)
+                    except Exception:
+                        pass
+                return df
 
-        # ---- Último recurso: caché obsoleta ----
-        if df is None and os.path.exists(cache_file):
+        # ---- Caché obsoleta ----
+        if os.path.exists(cache_file):
             try:
                 df = pd.read_parquet(cache_file)
                 if not df.empty:
-                    logger.warning(f"⚠️ Usando caché obsoleta para {symbol} {timeframe}")
+                    logger.warning(f"⚠️ Caché obsoleta para {symbol} {timeframe}")
+                    return df
             except Exception:
                 pass
 
-        return df
-
-    # --------------------------------------------------------
-    # FETCH INTERNO
-    # --------------------------------------------------------
+        return None
 
     def _try_fetch_ohlcv(
         self,
-        exchange_id: str,
+        ex: ccxt.Exchange,
+        ex_id: str,
         symbol: str,
         timeframe: str,
         limit: int,
     ) -> Optional[pd.DataFrame]:
-        """
-        Intenta obtener OHLCV de un exchange específico con reintentos.
-
-        Sigue la documentación de CCXT:
-        - Usa `limit` para acotar las velas (max 1000-5000 según exchange).
-        - Usa `enableRateLimit` para no exceder límites.
-        - Valida continuidad de velas.
-        """
-        ex = self.exchanges.get(exchange_id)
-        if ex is None:
-            return None
-
-        # Verificar que el símbolo exista en el exchange
+        """Intenta fetch en un exchange con reintentos."""
+        # Verificar que el símbolo exista
         if hasattr(ex, "symbols") and symbol not in ex.symbols:
-            logger.debug(f"⚠️ {symbol} no existe en {exchange_id}")
-            return None
-
-        # Verificar que soporte el timeframe
-        if hasattr(ex, "timeframes") and timeframe not in ex.timeframes:
-            logger.debug(f"⚠️ {timeframe} no soportado en {exchange_id}")
             return None
 
         for attempt in range(MAX_RETRIES):
             try:
-                # ---- fetch_ohlcv según documentación CCXT ----
-                # Parámetros: symbol, timeframe, since=None, limit=limit
-                # limit: máximo de velas a obtener
-                ohlcv = ex.fetch_ohlcv(
-                    symbol=symbol,
-                    timeframe=timeframe,
-                    since=None,          # desde la vela más reciente hacia atrás
-                    limit=limit,         # máximo de velas
-                )
-
+                ohlcv = ex.fetch_ohlcv(symbol, timeframe, limit=limit)
                 if not ohlcv or len(ohlcv) < 10:
-                    logger.debug(
-                        f"⚠️ {exchange_id} {symbol} {timeframe}: "
-                        f"solo {len(ohlcv) if ohlcv else 0} velas"
-                    )
-                    continue
+                    return None
 
-                # ---- Construir DataFrame ----
                 df = pd.DataFrame(
                     ohlcv,
                     columns=["timestamp", "open", "high", "low", "close", "volume"],
@@ -335,37 +318,18 @@ class DataEngine:
                 df = df.set_index("timestamp").sort_index()
                 df = df[~df.index.duplicated(keep="last")]
 
-                # ---- Validar ----
-                if not self._validate_ohlcv(df):
-                    continue
+                if not self._validate(df):
+                    return None
 
-                # ---- Validar continuidad ----
-                if not self._validate_continuity(df, timeframe):
-                    logger.warning(
-                        f"⚠️ {exchange_id} {symbol} {timeframe}: "
-                        f"velas no continuas, saltando"
-                    )
-                    continue
-
-                logger.debug(
-                    f"✅ {exchange_id} {symbol} {timeframe}: {len(df)} velas"
-                )
                 return df
 
-            except ccxt.RateLimitExceeded as e:
-                wait = RETRY_DELAY_SECONDS * (attempt + 1) * 2
-                logger.warning(
-                    f"⚠️ {exchange_id} rate limit, esperando {wait}s: {e}"
-                )
-                time.sleep(wait)
-            except ccxt.NetworkError as e:
-                logger.warning(f"⚠️ {exchange_id} red: {e}")
+            except ccxt.RateLimitExceeded:
+                time.sleep(RETRY_DELAY_SECONDS * (attempt + 1))
+            except ccxt.NetworkError:
                 time.sleep(RETRY_DELAY_SECONDS)
-            except ccxt.ExchangeError as e:
-                logger.warning(f"⚠️ {exchange_id} exchange: {e}")
-                break
-            except Exception as e:
-                logger.warning(f"⚠️ {exchange_id} {symbol}: {e}")
+            except ccxt.ExchangeError:
+                return None
+            except Exception:
                 time.sleep(RETRY_DELAY_SECONDS)
 
         return None
@@ -379,37 +343,18 @@ class DataEngine:
         symbol: str,
         exchange_id: str,
     ) -> Dict[str, Optional[pd.DataFrame]]:
-        """
-        Obtiene múltiples timeframes para un símbolo.
-
-        Timeframes: 5m, 15m, 1h, 4h.
-
-        Returns:
-            Dict con keys '5m', '15m', '1h', '4h'.
-        """
-        result: Dict[str, Optional[pd.DataFrame]] = {}
-        for tf in SUPPORTED_TIMEFRAMES:
-            try:
-                result[tf] = self.fetch_ohlcv(
-                    symbol=symbol,
-                    exchange_id=exchange_id,
-                    timeframe=tf,
-                    limit=OHLCV_LIMIT,
-                )
-            except Exception as e:
-                logger.warning(f"⚠️ {symbol} {tf}: {e}")
-                result[tf] = None
-        return result
+        """Obtiene 5m, 15m, 1h, 4h para un símbolo."""
+        return {
+            tf: self.fetch(symbol, exchange_id, tf, OHLCV_LIMIT)
+            for tf in SUPPORTED_TIMEFRAMES
+        }
 
     # --------------------------------------------------------
-    # VALIDACIONES
+    # VALIDACIÓN
     # --------------------------------------------------------
 
-    def _validate_ohlcv(self, df: pd.DataFrame) -> bool:
-        """Valida integridad básica de las velas."""
-        if df is None or df.empty:
-            return False
-        if len(df) < 50:
+    def _validate(self, df: pd.DataFrame) -> bool:
+        if df is None or df.empty or len(df) < 20:
             return False
         required = ["open", "high", "low", "close", "volume"]
         if not all(c in df.columns for c in required):
@@ -420,56 +365,9 @@ class DataEngine:
             return False
         if (df[["open", "high", "low", "close"]] <= 0).any().any():
             return False
-        if (df["volume"] < 0).any():
-            return False
         return True
 
-    def _validate_continuity(self, df: pd.DataFrame, timeframe: str) -> bool:
-        """
-        Valida que las velas sean continuas (sin gaps).
-
-        Sigue la documentación de CCXT: los gaps en OHLCV son comunes
-        pero no deben superar un umbral.
-        """
-        if df is None or len(df) < 10:
-            return False
-
-        # Duración esperada en milisegundos
-        tf_ms = self._timeframe_to_ms(timeframe)
-        if tf_ms <= 0:
-            return True  # No validar si no podemos calcular
-
-        # Calcular diferencias entre timestamps
-        diffs = df.index.to_series().diff().dropna()
-        diffs_ms = diffs.dt.total_seconds() * 1000
-
-        # Permitir gaps de hasta 2× la duración esperada
-        max_allowed = tf_ms * 2
-
-        # Contar gaps
-        n_gaps = (diffs_ms > max_allowed).sum()
-        gap_ratio = n_gaps / len(diffs_ms) if len(diffs_ms) > 0 else 0
-
-        # Permitir hasta 10% de gaps (datos de exchange no siempre perfectos)
-        return gap_ratio <= 0.10
-
-    @staticmethod
-    def _timeframe_to_ms(timeframe: str) -> float:
-        """Convierte timeframe a milisegundos."""
-        units = {"m": 60 * 1000, "h": 60 * 60 * 1000, "d": 24 * 60 * 60 * 1000}
-        try:
-            num = int(timeframe[:-1])
-            unit = timeframe[-1]
-            return num * units.get(unit, 0)
-        except Exception:
-            return 0.0
-
-    # --------------------------------------------------------
-    # CACHÉ
-    # --------------------------------------------------------
-
     def _cache_fresh(self, df: pd.DataFrame) -> bool:
-        """Verifica si la caché está fresca."""
         try:
             last = df.index[-1]
             if last.tzinfo is None:
@@ -484,23 +382,15 @@ class DataEngine:
     # --------------------------------------------------------
 
     def get_available_exchanges(self) -> List[str]:
-        """Retorna lista de exchanges conectados."""
         return list(self.available)
 
+    def get_blocked_exchanges(self) -> List[str]:
+        return list(self.blocked)
+
     def get_symbols_for_exchange(self, exchange_id: str) -> List[str]:
-        """Retorna los top 40 símbolos para un exchange."""
         return self.fetch_top_symbols(exchange_id)
 
-    def get_all_symbols(self) -> Dict[str, List[str]]:
-        """Retorna top 40 símbolos para cada exchange principal."""
-        result: Dict[str, List[str]] = {}
-        for ex_id in self.MAIN_EXCHANGES:
-            if ex_id in self.exchanges:
-                result[ex_id] = self.fetch_top_symbols(ex_id)
-        return result
-
     def is_symbol_available(self, symbol: str, exchange_id: str) -> bool:
-        """Verifica si un símbolo está disponible en un exchange."""
         ex = self.exchanges.get(exchange_id)
         if ex is None:
             return False
@@ -508,12 +398,11 @@ class DataEngine:
 
     @property
     def status(self) -> Dict:
-        """Retorna estado del motor de datos."""
         return {
             "available": self.available,
-            "main_exchanges": [e for e in self.MAIN_EXCHANGES if e in self.available],
-            "fallback_exchanges": [e for e in self.FALLBACK_EXCHANGES if e in self.available],
-            "n_exchanges": len(self.available),
-            "supported_timeframes": SUPPORTED_TIMEFRAMES,
-            "top_n_assets": TOP_N_ASSETS,
+            "blocked": self.blocked,
+            "n_available": len(self.available),
+            "n_blocked": len(self.blocked),
+            "timeframes": SUPPORTED_TIMEFRAMES,
+            "top_n": TOP_N_ASSETS,
         }
