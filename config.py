@@ -2,6 +2,7 @@
 # Ruta: config.py
 # ============================================================
 # D.A.P.S Ω — Cargador de configuración
+# Compatible con estructura exchanges.main + exchanges.fallback
 # ============================================================
 
 import os
@@ -65,28 +66,35 @@ class ScannerConfig:
         return inst
 
     def _validate(self) -> None:
+        """Validación defensiva. Solo crashea en errores graves."""
         # Claves mínimas
         for key in ("project", "exchanges", "symbols", "scoring", "risk", "tiers"):
             if key not in self.raw:
                 raise ConfigError(f"Falta clave '{key}' en config")
 
-        # Exchanges soportados
-        supported = self.raw["exchanges"].get("supported", [])
-        if not supported:
-            raise ConfigError("No hay exchanges en 'exchanges.supported'")
+        # ---- Exchanges: aceptar tanto 'supported' como 'main'+'fallback' ----
+        exchanges = self.raw["exchanges"]
+        main = exchanges.get("main", [])
+        fallback = exchanges.get("fallback", [])
+        supported = exchanges.get("supported", [])
 
-        # Símbolos
+        if not main and not supported:
+            raise ConfigError(
+                "No hay exchanges en 'exchanges.main' ni 'exchanges.supported'"
+            )
+
+        # ---- Símbolos ----
         total_symbols = sum(
             len(v) for v in self.raw["symbols"].values() if isinstance(v, list)
         )
         if total_symbols == 0:
-            raise ConfigError("No hay símbolos definidos")
+            logger.warning("⚠️ No hay símbolos estáticos; se cargarán dinámicamente")
 
-        # Pesos del scoring
+        # ---- Pesos del scoring ----
         w = self.raw["scoring"].get("weights", {})
         self.raw["scoring"]["weights"] = _normalize(w, "scoring.weights")
 
-        # Sub-pesos de volumen
+        # ---- Sub-pesos de volumen ----
         sw = self.raw["scoring"].get("sub_weights", {}).get("volume", {})
         self.raw["scoring"]["sub_weights"]["volume"] = _normalize(
             sw, "scoring.sub_weights.volume"
@@ -110,12 +118,33 @@ class ScannerConfig:
         return self.raw.get("exchanges", {})
 
     @property
+    def main_exchanges(self) -> List[str]:
+        """Exchanges principales (binance, bybit)."""
+        return list(self.exchanges.get("main", []))
+
+    @property
+    def fallback_exchanges(self) -> List[str]:
+        """Exchanges de respaldo (mexc, bitget, okx, kraken)."""
+        return list(self.exchanges.get("fallback", []))
+
+    @property
     def supported_exchanges(self) -> List[str]:
+        """
+        Todos los exchanges soportados (main + fallback).
+        Compatible con versiones anteriores que usaban 'supported'.
+        """
+        # Prioridad: main + fallback
+        main = self.main_exchanges
+        fallback = self.fallback_exchanges
+        if main or fallback:
+            return main + fallback
+        # Fallback: supported (versión anterior)
         return list(self.exchanges.get("supported", []))
 
     @property
     def exchange_priority(self) -> List[str]:
-        return list(self.exchanges.get("priority", []))
+        """Orden de prioridad para conexión."""
+        return self.supported_exchanges
 
     @property
     def symbols(self) -> Dict[str, List[str]]:
@@ -123,7 +152,7 @@ class ScannerConfig:
 
     @property
     def symbols_for_exchange(self) -> Dict[str, List[str]]:
-        """Devuelve símbolos por exchange."""
+        """Devuelve símbolos por exchange desde config."""
         out: Dict[str, List[str]] = {}
         for ex in self.supported_exchanges:
             out[ex] = list(self.symbols.get(ex, []))
@@ -135,7 +164,7 @@ class ScannerConfig:
 
     @property
     def supported_timeframes(self) -> List[str]:
-        return list(self.timeframes.get("supported", []))
+        return list(self.timeframes.get("supported", ["5m", "15m", "1h", "4h"]))
 
     @property
     def default_timeframe(self) -> str:
