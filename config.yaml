@@ -7,27 +7,29 @@
 
 project:
   name: "D.A.P.S Ω — Scanner Conservador"
-  version: "1.0.0"
+  version: "1.1.0"
   mode: "manual"
   timezone: "UTC"
   language: "es"
 
 # ------------------------------------------------------------
-# EXCHANGES SOPORTADOS
+# EXCHANGES
 # ------------------------------------------------------------
 exchanges:
-  supported:
+  main:
     - binance
     - bybit
-  priority:
-    - binance
-    - bybit
+  fallback:
+    - mexc
+    - bitget
+    - okx
+    - kraken
   rate_limit: true
   timeout_ms: 30000
   max_retries: 3
 
 # ------------------------------------------------------------
-# TIMEFRAMES SOPORTADOS
+# TIMEFRAMES
 # ------------------------------------------------------------
 timeframes:
   supported:
@@ -40,7 +42,8 @@ timeframes:
   min_bars_required: 200
 
 # ------------------------------------------------------------
-# UNIVERSO DE ACTIVOS (Top 50 Binance + Bybit exclusivos)
+# SÍMBOLOS (cargados dinámicamente como Top 40 por exchange)
+# Esta sección es un fallback si la carga dinámica falla.
 # ------------------------------------------------------------
 symbols:
   binance:
@@ -84,32 +87,50 @@ symbols:
     - FLOKI/USDT
     - SEI/USDT
     - TIA/USDT
-    - PYTH/USDT
-    - JUP/USDT
-    - RENDER/USDT
-    - FET/USDT
-    - AR/USDT
-    - STX/USDT
-    - KAS/USDT
-    - DASH/USDT
-    - ZEC/USDT
-    - XMR/USDT
   bybit:
-    - HYPE/USDT
-    - EIGEN/USDT
-    - CATI/USDT
-    - HMSTR/USDT
-    - BIO/USDT
-    - XPL/USDT
-    - FARTCOIN/USDT
-    - TRUMP/USDT
-    - COW/USDT
-    - WLD/USDT
-    - VELVET/USDT
-    - APR/USDT
+    - BTC/USDT
+    - ETH/USDT
+    - SOL/USDT
+    - BNB/USDT
+    - XRP/USDT
+    - DOGE/USDT
+    - ADA/USDT
+    - AVAX/USDT
+    - LINK/USDT
+    - DOT/USDT
+    - LTC/USDT
+    - BCH/USDT
+    - ETC/USDT
+    - XLM/USDT
+    - NEAR/USDT
+    - APT/USDT
+    - ARB/USDT
+    - OP/USDT
+    - INJ/USDT
+    - SUI/USDT
+    - UNI/USDT
+    - ATOM/USDT
+    - FIL/USDT
+    - VET/USDT
+    - ALGO/USDT
+    - ICP/USDT
+    - AAVE/USDT
+    - MKR/USDT
+    - CRV/USDT
+    - LDO/USDT
+    - SAND/USDT
+    - MANA/USDT
+    - GALA/USDT
+    - AXS/USDT
+    - PEPE/USDT
+    - WIF/USDT
+    - BONK/USDT
+    - FLOKI/USDT
+    - SEI/USDT
+    - TIA/USDT
 
 # ------------------------------------------------------------
-# SCORING — PESOS NORMALIZADOS (suman 1.0)
+# SCORING — PESOS NORMALIZADOS
 # ------------------------------------------------------------
 scoring:
   weights:
@@ -119,7 +140,6 @@ scoring:
     volatility: 0.11
     liquidity: 0.10
     regime: 0.07
-
   sub_weights:
     volume:
       tfi: 0.35
@@ -140,7 +160,7 @@ thresholds:
   min_expected_move_pct: 0.0032
 
 # ------------------------------------------------------------
-# TIERS (mejor → peor): Ω > A > B > S
+# TIERS (Ω > A > B > S)
 # ------------------------------------------------------------
 tiers:
   OMEGA: 90.0
@@ -190,7 +210,7 @@ risk:
     max_chase_pct: 0.005
 
 # ------------------------------------------------------------
-# COSTOS ESTIMADOS
+# COSTOS
 # ------------------------------------------------------------
 costs:
   fee_per_side: 0.0005
